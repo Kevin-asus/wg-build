@@ -1,0 +1,85 @@
+name: Build AmneziaWG for OpenWrt
+
+on:
+  workflow_dispatch:
+
+env:
+  OPENWRT_RELEASE: "24.10.8"
+  OPENWRT_TARGET: "ath79/generic"
+  KERNEL_ABI: "6.6.144-1-70248021204b78344d5fb62a0e7f5bea"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git wget curl zstd unzip rsync \
+            python3 python3-setuptools file
+
+      - name: Restore SDK cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: sdk
+          key: sdk-${{ env.OPENWRT_RELEASE }}-${{ env.OPENWRT_TARGET }}
+
+      - name: Download OpenWrt SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          base="https://downloads.openwrt.org/releases/${OPENWRT_RELEASE}/targets/${OPENWRT_TARGET}"
+          mkdir -p sdk
+          file="$(curl -fsSL "${base}/" | grep -oE 'openwrt-sdk-[^"'"'"']+Linux-x86_64\.tar\.zst' | head -n 1)"
+          test -n "$file"
+          echo "SDK tarball: $file"
+          curl -fL "${base}/${file}" -o "sdk/${file}"
+          tar --zstd -xf "sdk/${file}" -C sdk
+
+      - name: Add AmneziaWG package sources
+        run: |
+          set -eu
+          sdk="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+          echo "SDK dir: ${sdk}"
+
+          mkdir -p "${sdk}/package/kmod-amneziawg"
+          curl -fsSL \
+            https://raw.githubusercontent.com/soulripper13/amneziawg-openwrt-kmod-builder/master/package/kmod-amneziawg/Makefile \
+            -o "${sdk}/package/kmod-amneziawg/Makefile"
+          git clone --depth 1 --branch master \
+            https://github.com/amnezia-vpn/amneziawg-linux-kernel-module \
+            "${sdk}/package/kmod-amneziawg/src"
+
+          curl -fsSL https://codeload.github.com/amnezia-vpn/amneziawg-openwrt/tar.gz/refs/heads/master \
+            -o /tmp/awg.tar.gz
+          tar xzf /tmp/awg.tar.gz -C /tmp
+          cp -r /tmp/amneziawg-openwrt-master/amneziawg-tools "${sdk}/package/"
+
+      - name: Build packages
+        run: |
+          set -eu
+          sdk="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+          cd "${sdk}"
+          make defconfig
+          make package/kmod-amneziawg/compile V=s
+          make package/amneziawg-tools/compile V=s
+
+      - name: Collect and verify
+        run: |
+          set -eu
+          sdk="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+          mkdir -p artifacts
+          find "${sdk}/bin" -name 'kmod-amneziawg_*.ipk' -exec cp {} artifacts/ \;
+          find "${sdk}/bin" -name 'amneziawg-tools_*.ipk' -exec cp {} artifacts/ \;
+          ls -l artifacts
+          test -n "$(ls -A artifacts)"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: amneziawg-openwrt-24.10.8-ath79
+          path: artifacts/*.ipk
+          if-no-files-found: error
