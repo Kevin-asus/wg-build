@@ -6,19 +6,27 @@ on:
 env:
   OPENWRT_RELEASE: "24.10.8"
   OPENWRT_TARGET: "ath79/generic"
+  SDK_FILE: "openwrt-sdk-24.10.8-ath79-generic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
   KERNEL_ABI: "6.6.144-1-70248021204b78344d5fb62a0e7f5bea"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential git wget curl zstd unzip rsync \
-            python3 python3-setuptools file
+            build-essential clang flex bison g++ gawk gcc-multilib gettext git \
+            libncurses-dev libssl-dev python3 python3-setuptools rsync swig \
+            unzip zlib1g-dev file wget curl zstd
+
+      - name: Show environment
+        run: |
+          df -h .
+          free -h
+          nproc
 
       - name: Restore SDK cache
         id: cache
@@ -30,49 +38,61 @@ jobs:
       - name: Download OpenWrt SDK
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          set -eu
+          set -euo pipefail
           base="https://downloads.openwrt.org/releases/${OPENWRT_RELEASE}/targets/${OPENWRT_TARGET}"
           mkdir -p sdk
-          file="$(curl -fsSL "${base}/" | grep -oE 'openwrt-sdk-[^"'"'"']+Linux-x86_64\.tar\.zst' | head -n 1)"
-          test -n "$file"
-          echo "SDK tarball: $file"
-          curl -fL "${base}/${file}" -o "sdk/${file}"
-          tar --zstd -xf "sdk/${file}" -C sdk
+          curl -fL "${base}/${SDK_FILE}" -o "sdk/${SDK_FILE}"
+          tar --zstd -xf "sdk/${SDK_FILE}" -C sdk
+          ls -d sdk/openwrt-sdk-*
 
       - name: Add AmneziaWG package sources
         run: |
-          set -eu
+          set -euo pipefail
           sdk="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
           echo "SDK dir: ${sdk}"
 
-          mkdir -p "${sdk}/package/kmod-amneziawg"
+          pkg="${sdk}/package/kmod-amneziawg"
+          mkdir -p "${pkg}"
           curl -fsSL \
             https://raw.githubusercontent.com/soulripper13/amneziawg-openwrt-kmod-builder/master/package/kmod-amneziawg/Makefile \
-            -o "${sdk}/package/kmod-amneziawg/Makefile"
-        git clone --depth 1 --branch master \
+            -o "${pkg}/Makefile"
+
+          git clone --depth 1 --branch master \
             https://github.com/amnezia-vpn/amneziawg-linux-kernel-module \
-            "${sdk}/package/kmod-amneziawg/src-repo"
-          mv "${sdk}/package/kmod-amneziawg/src-repo/src" "${sdk}/package/kmod-amneziawg/src"
-          cp "${sdk}/package/kmod-amneziawg/src-repo/COPYING" "${sdk}/package/kmod-amneziawg/src/COPYING"
-          rm -rf "${sdk}/package/kmod-amneziawg/src-repo"
+            "${pkg}/src-repo"
+          mv "${pkg}/src-repo/src" "${pkg}/src"
+          cp "${pkg}/src-repo/COPYING" "${pkg}/src/COPYING"
+          rm -rf "${pkg}/src-repo"
 
           curl -fsSL https://codeload.github.com/amnezia-vpn/amneziawg-openwrt/tar.gz/refs/heads/master \
             -o /tmp/awg.tar.gz
           tar xzf /tmp/awg.tar.gz -C /tmp
           cp -r /tmp/amneziawg-openwrt-master/amneziawg-tools "${sdk}/package/"
 
+          ls "${pkg}"
+          ls "${pkg}/src" | head -n 30
+          test -f "${pkg}/src/Makefile"
+          test -f "${pkg}/src/COPYING"
+          ls "${sdk}/package/amneziawg-tools"
+
       - name: Build packages
+        id: build
+        continue-on-error: true
         run: |
-          set -eu
+          set -uo pipefail
           sdk="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
           cd "${sdk}"
-          make defconfig
-          make package/kmod-amneziawg/compile V=s
-          make package/amneziawg-tools/compile V=s
+          make defconfig 2>&1 | tee ../build.log
+          echo "=== kmod-amneziawg ===" | tee -a ../build.log
+          make package/kmod-amneziawg/compile V=s 2>&1 | tee -a ../build.log
+          echo "=== amneziawg-tools ===" | tee -a ../build.log
+          make package/amneziawg-tools/compile V=s 2>&1 | tee -a ../build.log
+          echo "=== result ===" | tee -a ../build.log
+          find bin -name '*.ipk' | tee -a ../build.log || true
 
-      - name: Collect and verify
+      - name: Collect packages
         run: |
-          set -eu
+          set -euo pipefail
           sdk="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
           mkdir -p artifacts
           find "${sdk}/bin" -name 'kmod-amneziawg_*.ipk' -exec cp {} artifacts/ \;
@@ -80,9 +100,18 @@ jobs:
           ls -l artifacts
           test -n "$(ls -A artifacts)"
 
-      - name: Upload artifacts
+      - name: Upload packages
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: amneziawg-openwrt-24.10.8-ath79
           path: artifacts/*.ipk
           if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
