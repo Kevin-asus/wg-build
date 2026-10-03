@@ -49,9 +49,12 @@ jobs:
           curl -fsSL \
             https://raw.githubusercontent.com/soulripper13/amneziawg-openwrt-kmod-builder/master/package/kmod-amneziawg/Makefile \
             -o "${sdk}/package/kmod-amneziawg/Makefile"
-          git clone --depth 1 --branch master \
+        git clone --depth 1 --branch master \
             https://github.com/amnezia-vpn/amneziawg-linux-kernel-module \
-            "${sdk}/package/kmod-amneziawg/src"
+            "${sdk}/package/kmod-amneziawg/src-repo"
+          mv "${sdk}/package/kmod-amneziawg/src-repo/src" "${sdk}/package/kmod-amneziawg/src"
+          cp "${sdk}/package/kmod-amneziawg/src-repo/COPYING" "${sdk}/package/kmod-amneziawg/src/COPYING"
+          rm -rf "${sdk}/package/kmod-amneziawg/src-repo"
 
           curl -fsSL https://codeload.github.com/amnezia-vpn/amneziawg-openwrt/tar.gz/refs/heads/master \
             -o /tmp/awg.tar.gz
